@@ -36,18 +36,24 @@
 #define TOUCHGATE 1    //this is the gate output jack that turns on when a touch pad is being pressed
 #define ROW_SELECT 13  //this is the pin that sets which row the "merge" jack is listenning to. HIGH is row A, LOW is row B
 
+//Commands
+#define CMD_FORWARD 1
+#define CMD_BACKWARD 2
+#define CMD_ZERO 3
+#define CMD_RESET 4
+
 
 // this is the capacitive touch threshold for each pad
 // go for a lower number for more sensitivity if you have fingers as dry as the sahara
 int TOUCH_THRESHOLDS[] = {
-  80,
-  80,
-  80,
-  80,
-  100,
-  120,
-  180,
-  260,
+  250,
+  250,
+  250,
+  250,
+  250,
+  250,
+  250,
+  280,
 };
 int touchReadDelay = 0;  //a delay of zero! ooohllallaaa
 
@@ -56,14 +62,21 @@ int zeroInputValue = 0;
 int resetInputValue = 0;
 int backInputValue = 0;
 
-int activeFinger = -1;
-int clockbypass = 0;
-int fingerDetectionCountdown = 0;
+int command = 0;
+
+int fingerDetectionCountdown[] = {0,0,0,0,0,0,0,0};
+int fingerCount = 0;
 
 int step = -1;
 
 int row = 0;
 int rowStep = 0;
+
+int arpStep = 0;
+bool arpModeActive = false;
+
+int arpThresholdReductionFactor = 2;
+int arpThresholdReductionCounter = 0;
 
 void setup() {
   pinMode(ROW_SELECT, OUTPUT);
@@ -86,42 +99,39 @@ void setup() {
 * Touchpad inputs
 */
 void readTouchpads() {
-
-  bool padTouchDetected = false;
+  fingerCount = 0;
   for (int i = 7; i >= 0; i--) {
-
-    if (activeFinger > i) {
-      // Ignore this touchpad, we have an active finger at a higher priority/position
-      continue;
-    }
-
     int touchValue = analogRead(i);
-    if ((touchValue > TOUCH_THRESHOLDS[i])) {
-      step = i;
-      activeFinger = i;
-      clockbypass = 1;
-      fingerDetectionCountdown = 100;
+
+    // The values will become lower as more fingers are placed on the pads.
+    // This requires the sensitivity to temporarily increase.
+    int threshold = arpThresholdReductionCounter > 0 ? TOUCH_THRESHOLDS[i] / arpThresholdReductionFactor : TOUCH_THRESHOLDS[i];
+
+    if (touchValue > threshold) {
+      fingerCount++;
+      fingerDetectionCountdown[i] = 100; // Reset the cooldown
       digitalWrite(TOUCHGATE, HIGH);
       delay(touchReadDelay);
-      padTouchDetected = true;
+    } else if(fingerDetectionCountdown[i] > 0){
+      // We still have an active cooldown
+      if(--fingerDetectionCountdown[i] > 0){
+        fingerCount++;
+      }
     }
   }
 
-  // We're no longer touching the pad, we just stopped.
+  // We're no longer touching any pads, we just stopped.
   // We'll wait some additional cycles while acting like the pad is still being
   // pressed to smooth out any noise.
-  if (!padTouchDetected && fingerDetectionCountdown > 0) {
-    fingerDetectionCountdown--;
-
-    // We've hit enough cycles of not seeing a finger. Let the clock tick away.
-    if (fingerDetectionCountdown == 0) {
-      clockbypass = 0;
-      fingerDetectionCountdown = 0;
-      activeFinger = -1;
-      digitalWrite(TOUCHGATE, LOW);
-    }
+  if (fingerCount == 0) {
+    digitalWrite(TOUCHGATE, LOW);
+  } else if(fingerCount > 2){
+    arpThresholdReductionCounter = 200;
   }
 
+  if(arpThresholdReductionCounter > 0){
+    arpThresholdReductionCounter--;
+  }
 
 }
 
@@ -130,37 +140,25 @@ void readTouchpads() {
 */
 void readControlInputs() {
 
+  command = 0;
+
   // A finger is being held down. No need to read the controls/clock inputs
-  if (clockbypass) {
-    return;
-  }
 
   int newForwardInputValue = digitalRead(FORWARDS);
   int newBackInputValue = digitalRead(BACK);
   int newZeroInputValue = digitalRead(ZERO);
   int newResetInputValue = digitalRead(RESET);
 
-  if ((newForwardInputValue == LOW) & (forwardInputValue == HIGH))  //FORWARD command
-  {
-    step++;
-    if (step > 15) { step = 0; }
-  }
-
-
-  if ((newBackInputValue == LOW) & (backInputValue == HIGH))  //BACKWARD command
-  {
-    step--;
-    if (step < 0) { step = 15; }
-  }
-
-  if ((newZeroInputValue == LOW) & (zeroInputValue == HIGH))  //zero this makes the sequencer have no step output, this is good for when you want the start clock to actually begin on step 1
-  {
-    step = -1;
-  }
-
+  // We can only read in a single command per iteration. Set the priority based on the order of the conditionals (if/else statemenst)
   if ((newResetInputValue == LOW) & (resetInputValue == HIGH))  //reset to 1
   {
-    step = 0;
+    command = CMD_RESET;
+  } else if((newZeroInputValue == LOW) & (zeroInputValue == HIGH)){
+    command = CMD_ZERO;
+  } else if((newBackInputValue == LOW) & (backInputValue == HIGH)){
+    command = CMD_BACKWARD;
+  } else if((newForwardInputValue == LOW) & (forwardInputValue == HIGH)){
+    command = CMD_FORWARD;
   }
 
   forwardInputValue = newForwardInputValue;
@@ -169,7 +167,64 @@ void readControlInputs() {
   backInputValue = newBackInputValue;
 }
 
+
+int getStepForFingerNum(int n){
+  n = n % fingerCount;
+    for(int i = 0; i < 8; i++){
+      if(fingerDetectionCountdown[i] > 0){
+        if(n == 0){
+          return i;
+        } else {
+          n--;
+        }
+      }
+    }
+    return -1;
+}
+
 void updateStep() {
+  if(fingerCount == 0){
+    arpModeActive = false; // No fingers, no arp
+  }
+
+  if(fingerCount > 0){
+    // //Highest pad/step wins, by default
+    if(!arpModeActive){
+      for(int i = 0; i < 8; i++){
+          if(fingerDetectionCountdown[i] > 0){
+            step = i;
+          }
+      }
+    }
+
+    if(command == CMD_FORWARD){
+      step = getStepForFingerNum(arpStep++);
+      arpModeActive = true; 
+    } else if(command == CMD_BACKWARD) {
+      step = getStepForFingerNum(arpStep--);
+      arpModeActive = true;
+    }
+    if(arpStep < 0){
+      arpStep = fingerCount - 1;
+    }
+    arpStep = arpStep % fingerCount;
+
+  } else if(command != 0){
+    //Handle the current command
+    if(command == CMD_FORWARD){
+      step = (step + 1) % 16;
+    } else if(command == CMD_BACKWARD){
+      step = (step - 1);
+      if(step < 0){
+        step = 15;
+      }
+    } else if(command == CMD_ZERO){
+      step = -1;
+    } else if(command == CMD_RESET){
+      step = 0;
+    }
+  }
+
   if (step == -1) {  // We don't have an active step
     rowStep = -1;
     row = 0;
