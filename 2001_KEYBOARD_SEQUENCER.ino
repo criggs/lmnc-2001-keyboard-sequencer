@@ -1,5 +1,7 @@
 //LOOK MUM NO COMPUTER KEYBOARD SEQUENCER.
-//VERSION 2.2
+
+//VERSION 2.3 - Adds ARP feature
+
 //VERSION 2.2 flips from reading pads high to reading pads low (if you have the kosmo format sequencer board from 2021-2024 you need to modify it to use this code, mod info on
 //the look mum no computer website on the sequencer page in projects). it also is much more stable in function. and quicker!
 //A SIMPLE DESIGN TO MAKE A 4017 STYLE SEQUENCER WITH MORE ADDED FUNCTIONS.
@@ -11,6 +13,39 @@
 
 //In Look Mum No Computer Arduino Project Style Its been written in the purest plonker form.
 //triple distilled plonker code.
+
+// The distilled plonker code has been further refined by Chris Riggs to make it easier to add new features
+
+
+/////////////////////////////////////////////////////////
+//
+// Settings you might want to tweak
+//
+
+/**
+* This is the minimum sensitivity to sense a touch
+*/
+#define TOUCH_TRIGGER_SENSITIVITY 80 
+
+/**
+* This determines the allowed 'tightness' for detecting multiple fingers and prevents ghost fingers.
+* 
+* All sensed fingers must be no further than this amount below the maximum sensed finger value.
+*/
+#define TOUCH_SENSITIVITY_GROUPING 40
+
+/**
+* The number of cycles until a missing finger is considered no longer pressed.
+* This smooths out the finger presses.
+*/
+#define FINGER_SMOOTHING_CYCLES 25
+
+
+
+/////////////////////////////////////////////////////////
+//
+// Other Settings/Configuration
+//
 
 #define STEP1 2        //step 1 output
 #define STEP2 3        //step 2 output
@@ -43,18 +78,6 @@
 #define CMD_RESET 4
 
 
-// this is the capacitive touch threshold for each pad
-// go for a lower number for more sensitivity if you have fingers as dry as the sahara
-int TOUCH_THRESHOLDS[] = {
-  250,
-  250,
-  250,
-  250,
-  250,
-  250,
-  250,
-  280,
-};
 int touchReadDelay = 0;  //a delay of zero! ooohllallaaa
 
 int forwardInputValue = 0;
@@ -74,9 +97,6 @@ int rowStep = 0;
 
 int arpStep = 0;
 bool arpModeActive = false;
-
-int arpThresholdReductionFactor = 2;
-int arpThresholdReductionCounter = 0;
 
 void setup() {
   pinMode(ROW_SELECT, OUTPUT);
@@ -100,16 +120,30 @@ void setup() {
 */
 void readTouchpads() {
   fingerCount = 0;
-  for (int i = 7; i >= 0; i--) {
-    int touchValue = analogRead(i);
 
-    // The values will become lower as more fingers are placed on the pads.
-    // This requires the sensitivity to temporarily increase.
-    int threshold = arpThresholdReductionCounter > 0 ? TOUCH_THRESHOLDS[i] / arpThresholdReductionFactor : TOUCH_THRESHOLDS[i];
+
+  int maxFingerValue = 0;
+  int minFingerValue = 1000000;
+
+  int fingerValues[8]; 
+
+  //Read all of the pads/finger values and find the min/max
+  for (int i = 7; i >= 0; i--) {
+    int val = analogRead(i);
+    fingerValues[i] = val;
+    minFingerValue = min(minFingerValue, val);
+    maxFingerValue = max(maxFingerValue, val);
+  }
+
+  // Dynamically set the threshold based on the max value we got. We need at least TOUCH_TRIGGER_SENSITIVITY
+  int threshold = max(TOUCH_TRIGGER_SENSITIVITY, maxFingerValue - TOUCH_SENSITIVITY_GROUPING);
+
+  for (int i = 7; i >= 0; i--) {
+    int touchValue = fingerValues[i];
 
     if (touchValue > threshold) {
       fingerCount++;
-      fingerDetectionCountdown[i] = 100; // Reset the cooldown
+      fingerDetectionCountdown[i] = FINGER_SMOOTHING_CYCLES; // Reset the cooldown
       digitalWrite(TOUCHGATE, HIGH);
       delay(touchReadDelay);
     } else if(fingerDetectionCountdown[i] > 0){
@@ -125,14 +159,7 @@ void readTouchpads() {
   // pressed to smooth out any noise.
   if (fingerCount == 0) {
     digitalWrite(TOUCHGATE, LOW);
-  } else if(fingerCount > 2){
-    arpThresholdReductionCounter = 200;
   }
-
-  if(arpThresholdReductionCounter > 0){
-    arpThresholdReductionCounter--;
-  }
-
 }
 
 /**
@@ -197,6 +224,7 @@ void updateStep() {
       }
     }
 
+    // Multiple fingers and we got a step command?!?! Time to ARP!!!
     if(command == CMD_FORWARD){
       step = getStepForFingerNum(arpStep++);
       arpModeActive = true; 
