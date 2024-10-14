@@ -25,22 +25,36 @@
 /**
 * This is the minimum sensitivity to sense a touch
 */
-#define TOUCH_TRIGGER_SENSITIVITY 80 
+#define TOUCH_TRIGGER_SENSITIVITY 90
 
 /**
 * This determines the allowed 'tightness' for detecting multiple fingers and prevents ghost fingers.
 * 
 * All sensed fingers must be no further than this amount below the maximum sensed finger value.
 */
-#define TOUCH_SENSITIVITY_GROUPING 40
+#define TOUCH_SENSITIVITY_GROUPING 130
 
 /**
 * The number of cycles until a missing finger is considered no longer pressed.
 * This smooths out the finger presses.
 */
-#define FINGER_SMOOTHING_CYCLES 25
+#define FINGER_SMOOTHING_CYCLES 20
 
+/**
+* The number of cycles that a finger needs to be above the threshold before we will start reading its value
+*
+* This removes a bit of possible noise that might trigger a finger accidentally
+*/
+#define MIN_THRESHOLD_CYCLES 2
 
+/**
+* wtf, why does the previous analog read sometimes affect the next read?
+* 
+* This is the number of times A0 and A7 are pre-read each cycle before getting the used sample value
+*
+* This is done to prevent bounching between the first and last pad
+*/
+#define PAD_PREREAD_COUNT 7
 
 /////////////////////////////////////////////////////////
 //
@@ -77,9 +91,6 @@
 #define CMD_ZERO 3
 #define CMD_RESET 4
 
-
-int touchReadDelay = 0;  //a delay of zero! ooohllallaaa
-
 int forwardInputValue = 0;
 int zeroInputValue = 0;
 int resetInputValue = 0;
@@ -87,7 +98,8 @@ int backInputValue = 0;
 
 int command = 0;
 
-int fingerDetectionCountdown[] = {0,0,0,0,0,0,0,0};
+int fingerDetectionCountdown[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+int fingerOverThresholdCount[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 int fingerCount = 0;
 
 int step = -1;
@@ -121,35 +133,58 @@ void setup() {
 void readTouchpads() {
   fingerCount = 0;
 
-
   int maxFingerValue = 0;
   int minFingerValue = 1000000;
 
-  int fingerValues[8]; 
+  int fingerValues[8];
 
   //Read all of the pads/finger values and find the min/max
-  for (int i = 7; i >= 0; i--) {
+  for (int i = 0; i < 8; i++) {
+
+    // Preread the first and last value
+
+    // You might ask why we're doing this.
+    // What possible reason would we have to read the values
+    // throw them away and then read them again.
+    // My answer to you is this: Sometimes the first read value in
+    // the loop is effected by the last read value. ¯\_(ツ)_/¯
+    if (i == 0 || i == 7) {
+      for (int j = 0; j < PAD_PREREAD_COUNT; j++) {
+        analogRead(i);
+      }
+    }
     int val = analogRead(i);
     fingerValues[i] = val;
+
     minFingerValue = min(minFingerValue, val);
     maxFingerValue = max(maxFingerValue, val);
   }
 
   // Dynamically set the threshold based on the max value we got. We need at least TOUCH_TRIGGER_SENSITIVITY
+  //int threshold = max(TOUCH_TRIGGER_SENSITIVITY, maxFingerValue - TOUCH_SENSITIVITY_GROUPING);
   int threshold = max(TOUCH_TRIGGER_SENSITIVITY, maxFingerValue - TOUCH_SENSITIVITY_GROUPING);
 
-  for (int i = 7; i >= 0; i--) {
+  for (int i = 0; i < 8; i++) {
     int touchValue = fingerValues[i];
 
     if (touchValue > threshold) {
+
+      // Smooth new fingers to make sure it isn't noise from an adjacent finger
+      // This mostly happens between the first and last pad
+      fingerOverThresholdCount[i]++;
+      if (fingerOverThresholdCount[i] < MIN_THRESHOLD_CYCLES) {
+        continue;
+      }
+
       fingerCount++;
-      fingerDetectionCountdown[i] = FINGER_SMOOTHING_CYCLES; // Reset the cooldown
+      fingerDetectionCountdown[i] = FINGER_SMOOTHING_CYCLES;  // Reset the cooldown
       digitalWrite(TOUCHGATE, HIGH);
-      delay(touchReadDelay);
-    } else if(fingerDetectionCountdown[i] > 0){
+    } else if (fingerDetectionCountdown[i] > 0) {
       // We still have an active cooldown
-      if(--fingerDetectionCountdown[i] > 0){
+      if (--fingerDetectionCountdown[i] > 0) {
         fingerCount++;
+      } else {
+        fingerOverThresholdCount[i] = 0;
       }
     }
   }
@@ -180,11 +215,11 @@ void readControlInputs() {
   if ((newResetInputValue == LOW) & (resetInputValue == HIGH))  //reset to 1
   {
     command = CMD_RESET;
-  } else if((newZeroInputValue == LOW) & (zeroInputValue == HIGH)){
+  } else if ((newZeroInputValue == LOW) & (zeroInputValue == HIGH)) {
     command = CMD_ZERO;
-  } else if((newBackInputValue == LOW) & (backInputValue == HIGH)){
+  } else if ((newBackInputValue == LOW) & (backInputValue == HIGH)) {
     command = CMD_BACKWARD;
-  } else if((newForwardInputValue == LOW) & (forwardInputValue == HIGH)){
+  } else if ((newForwardInputValue == LOW) & (forwardInputValue == HIGH)) {
     command = CMD_FORWARD;
   }
 
@@ -195,60 +230,60 @@ void readControlInputs() {
 }
 
 
-int getStepForFingerNum(int n){
+int getStepForFingerNum(int n) {
   n = n % fingerCount;
-    for(int i = 0; i < 8; i++){
-      if(fingerDetectionCountdown[i] > 0){
-        if(n == 0){
-          return i;
-        } else {
-          n--;
-        }
+  for (int i = 0; i < 8; i++) {
+    if (fingerDetectionCountdown[i] > 0) {
+      if (n == 0) {
+        return i;
+      } else {
+        n--;
       }
     }
-    return -1;
+  }
+  return -1;
 }
 
 void updateStep() {
-  if(fingerCount == 0){
-    arpModeActive = false; // No fingers, no arp
+  if (fingerCount == 0) {
+    arpModeActive = false;  // No fingers, no arp
   }
 
-  if(fingerCount > 0){
+  if (fingerCount > 0) {
     // //Highest pad/step wins, by default
-    if(!arpModeActive){
-      for(int i = 0; i < 8; i++){
-          if(fingerDetectionCountdown[i] > 0){
-            step = i;
-          }
+    if (!arpModeActive) {
+      for (int i = 0; i < 8; i++) {
+        if (fingerDetectionCountdown[i] > 0) {
+          step = i;
+        }
       }
     }
 
     // Multiple fingers and we got a step command?!?! Time to ARP!!!
-    if(command == CMD_FORWARD){
+    if (command == CMD_FORWARD) {
       step = getStepForFingerNum(arpStep++);
-      arpModeActive = true; 
-    } else if(command == CMD_BACKWARD) {
+      arpModeActive = true;
+    } else if (command == CMD_BACKWARD) {
       step = getStepForFingerNum(arpStep--);
       arpModeActive = true;
     }
-    if(arpStep < 0){
+    if (arpStep < 0) {
       arpStep = fingerCount - 1;
     }
     arpStep = arpStep % fingerCount;
 
-  } else if(command != 0){
+  } else if (command != 0) {
     //Handle the current command
-    if(command == CMD_FORWARD){
+    if (command == CMD_FORWARD) {
       step = (step + 1) % 16;
-    } else if(command == CMD_BACKWARD){
+    } else if (command == CMD_BACKWARD) {
       step = (step - 1);
-      if(step < 0){
+      if (step < 0) {
         step = 15;
       }
-    } else if(command == CMD_ZERO){
+    } else if (command == CMD_ZERO) {
       step = -1;
-    } else if(command == CMD_RESET){
+    } else if (command == CMD_RESET) {
       step = 0;
     }
   }
@@ -273,3 +308,4 @@ void loop() {
   readControlInputs();
   updateStep();
 }
+
