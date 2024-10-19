@@ -30,31 +30,54 @@
 /**
 * This determines the allowed 'tightness' for detecting multiple fingers and prevents ghost fingers.
 * 
-* All sensed fingers must be no further than this amount below the maximum sensed finger value.
+* All sensed fingers must be above this percentage of the maximum finger value
 */
-#define TOUCH_SENSITIVITY_GROUPING 130
+#define TOUCH_SENSITIVITY_GROUPING_FACTOR 0.6
 
 /**
 * The number of cycles until a missing finger is considered no longer pressed.
 * This smooths out the finger presses.
 */
-#define FINGER_SMOOTHING_CYCLES 20
+#define FINGER_SMOOTHING_CYCLES 10
 
 /**
 * The number of cycles that a finger needs to be above the threshold before we will start reading its value
 *
 * This removes a bit of possible noise that might trigger a finger accidentally
 */
-#define MIN_THRESHOLD_CYCLES 2
+#define MIN_THRESHOLD_CYCLES 10
 
 /**
+*
+* DEPRECATED: Not currently using this setting. It was a hack. A dirty, disgusting hack....
+*
 * wtf, why does the previous analog read sometimes affect the next read?
 * 
 * This is the number of times A0 and A7 are pre-read each cycle before getting the used sample value
 *
 * This is done to prevent bounching between the first and last pad
+*
 */
-#define PAD_PREREAD_COUNT 7
+#define PAD_PREREAD_COUNT 0
+
+
+/**
+* Uncomment to enable debug mode
+*
+* When debugging, digital pins 0 and 1 will be used for serial communication. That means they cannot
+* be used for BACK trigger input and TOUCHGATE ouput. Not a big deal as the purpose of debug mode is
+* mostly to get the capacitive touch values for tuning the touch threshold settings.
+*
+* NOTE: IMPORTANT!!! The debugging setting will write data to serial out. This adds a bunch of extra
+* overhead to each program cycle. Since most of our sampling and smoothing is cycle based, that means
+* it won't work quite the same. If you're debugging and want "normal-ish" behavior, you'll need to
+* tweak (i.e. lower) most of the cycle values. Debugging is really good to see what the values are
+* under various levels of smoothing, though :)
+* 
+* Debugging output is formatted for live graphing with the TelePlot VS Code extension:
+* https://marketplace.visualstudio.com/items?itemName=alexnesnes.teleplot
+*/
+//#define DEBUG
 
 /////////////////////////////////////////////////////////
 //
@@ -102,6 +125,35 @@ int fingerDetectionCountdown[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 int fingerOverThresholdCount[] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 int fingerCount = 0;
 
+
+
+struct SampleQueue{
+  int currentIndex;
+  int size;
+  int *samples;
+};
+
+
+// Initialize the sample data structures
+#define THRESHOLD_SAMPLE_SIZE 3
+int _thresholdSamples[THRESHOLD_SAMPLE_SIZE];
+SampleQueue thresholdSamples = {0,THRESHOLD_SAMPLE_SIZE, _thresholdSamples};
+
+#define FINGER_SAMPLE_SIZE 10
+int _fingerSamples[8][FINGER_SAMPLE_SIZE];
+
+SampleQueue fingerSamples[8] = {
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[0]},
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[1]},
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[2]},
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[3]},
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[4]},
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[5]},
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[6]},
+  {0, FINGER_SAMPLE_SIZE, _fingerSamples[7]},
+};
+
+
 int step = -1;
 
 int row = 0;
@@ -111,6 +163,14 @@ int arpStep = 0;
 bool arpModeActive = false;
 
 void setup() {
+
+#ifdef DEBUG
+  //Setup serial. We won't be able to use BACK/TOUCHGATE pins while debugging
+  Serial.begin(115200);
+  Serial.print("LMNC 2001 KEYBOARD SEQUENCER\n");
+  Serial.print("Debug mode activated...\n");
+#endif
+
   pinMode(ROW_SELECT, OUTPUT);
   pinMode(STEP1, OUTPUT);
   pinMode(STEP2, OUTPUT);
@@ -121,10 +181,33 @@ void setup() {
   pinMode(STEP7, OUTPUT);
   pinMode(STEP8, OUTPUT);
   pinMode(FORWARDS, INPUT);
+#ifndef DEBUG
   pinMode(BACK, INPUT);
+#endif
   pinMode(RESET, INPUT);
   pinMode(ZERO, INPUT);
+#ifndef DEBUG
   pinMode(TOUCHGATE, OUTPUT);
+#endif
+}
+
+int getSlidingMaxSample(int newSample, int minValue, SampleQueue &queue) {
+  queue.samples[queue.currentIndex] = newSample;
+  queue.currentIndex = (queue.currentIndex + 1) % queue.size;
+
+  // There's absolutely a better algorithm for this.
+  // We should be able to keep a pointer to the current max
+  // and compare that with the new sample. If the previous max
+  // was being aged off, then we would have to scan the full list.
+  // Alternatively, we could keep a heap of the values in addition
+  // to a queue. But for a sample size of 10.... not worth the effort when
+  // it's after midnight and I need to grab another beer.
+  int newMax = minValue;
+  //use the lazy brute force way to get the max
+  for(int i=0; i < queue.size; i++){
+    newMax = max(newMax, queue.samples[i]);
+  }
+  return newMax;
 }
 
 /**
@@ -154,15 +237,38 @@ void readTouchpads() {
       }
     }
     int val = analogRead(i);
+
+    // Ceiling for values so nothing gets too crazy.
+    // The max on the lower digital pins seems to be about 600 for a normal pad, but the top 3 can go from 800-1000
+    // No need to let them mess with thresholds by getting that high
+    if(val > 600){
+      val = 600;
+    }
+
+    val = getSlidingMaxSample(val, 0, fingerSamples[i]);
     fingerValues[i] = val;
+
+#ifdef DEBUG
+    Serial.print(">p_");
+    Serial.print(i);
+    Serial.print(":");
+    Serial.print(val);
+    Serial.print("\n");
+#endif
 
     minFingerValue = min(minFingerValue, val);
     maxFingerValue = max(maxFingerValue, val);
   }
 
   // Dynamically set the threshold based on the max value we got. We need at least TOUCH_TRIGGER_SENSITIVITY
-  //int threshold = max(TOUCH_TRIGGER_SENSITIVITY, maxFingerValue - TOUCH_SENSITIVITY_GROUPING);
-  int threshold = max(TOUCH_TRIGGER_SENSITIVITY, maxFingerValue - TOUCH_SENSITIVITY_GROUPING);
+  int threshold = max(TOUCH_TRIGGER_SENSITIVITY, (int) (maxFingerValue * TOUCH_SENSITIVITY_GROUPING_FACTOR));
+  threshold = getSlidingMaxSample(threshold, TOUCH_TRIGGER_SENSITIVITY, thresholdSamples);
+
+#ifdef DEBUG
+  Serial.print(">t:");
+  Serial.print(threshold);
+  Serial.print("\n");
+#endif
 
   for (int i = 0; i < 8; i++) {
     int touchValue = fingerValues[i];
@@ -308,4 +414,3 @@ void loop() {
   readControlInputs();
   updateStep();
 }
-
