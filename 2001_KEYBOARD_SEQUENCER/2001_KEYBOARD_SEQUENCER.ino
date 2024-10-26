@@ -25,7 +25,7 @@
 /**
 * This is the minimum sensitivity to sense a touch
 */
-#define TOUCH_TRIGGER_SENSITIVITY 90
+#define TOUCH_TRIGGER_SENSITIVITY 50
 
 /**
 * This determines the allowed 'tightness' for detecting multiple fingers and prevents ghost fingers.
